@@ -1,6 +1,10 @@
-# sinc-llm
+<p align="center">
+  <img src="assets/logo.png" alt="sinc-llm logo" width="180">
+</p>
 
-**Nyquist-Shannon Sampling for LLM Prompts**
+<h1 align="center">sinc-llm</h1>
+
+<p align="center"><strong>Nyquist-Shannon Sampling for LLM Prompts</strong></p>
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19152668.svg)](https://doi.org/10.5281/zenodo.19152668)
 [![PyPI](https://img.shields.io/pypi/v/sinc-llm)](https://pypi.org/project/sinc-llm/)
