@@ -63,6 +63,9 @@ def scatter_main(argv: Optional[List[str]] = None) -> None:
     )
     parser.add_argument("prompt", nargs="*", help="Raw prompt text (or pipe via stdin)")
     parser.add_argument("--execute", action="store_true", help="Also execute the scattered prompt")
+    parser.add_argument("--provider", default="anthropic",
+                        choices=["anthropic", "openai", "ollama", "vllm"],
+                        help="LLM provider (default: anthropic)")
     parser.add_argument("--model", default="claude-haiku-4-20250514",
                         help="Model for scatter (default: haiku)")
     parser.add_argument("--execute-model", default="claude-sonnet-4-20250514",
@@ -188,6 +191,9 @@ def engine_main(argv: Optional[List[str]] = None) -> None:
     )
     parser.add_argument("file", nargs="?", help="Sinc JSON file (or pipe via stdin)")
     parser.add_argument("--dry-run", action="store_true", help="Validate only, do not execute")
+    parser.add_argument("--provider", default="anthropic",
+                        choices=["anthropic", "openai", "ollama", "vllm"],
+                        help="LLM provider (default: anthropic)")
     parser.add_argument("--model", default="claude-sonnet-4-20250514", help="Model for execution")
     parser.add_argument("--api-key", default=None, help="Anthropic API key")
     parser.add_argument("--max-tokens", type=int, default=8192, help="Max response tokens")
@@ -340,6 +346,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     sp_scatter = subparsers.add_parser("scatter", help="Decompose raw prompt into sinc JSON")
     sp_scatter.add_argument("prompt", nargs="*")
     sp_scatter.add_argument("--execute", action="store_true")
+    sp_scatter.add_argument("--provider", default="anthropic",
+                            choices=["anthropic", "openai", "ollama", "vllm"],
+                            help="LLM provider (default: anthropic)")
     sp_scatter.add_argument("--model", default="claude-haiku-4-20250514")
     sp_scatter.add_argument("--execute-model", default="claude-sonnet-4-20250514")
     sp_scatter.add_argument("--api-key", default=None)
@@ -348,9 +357,28 @@ def main(argv: Optional[List[str]] = None) -> None:
     sp_engine = subparsers.add_parser("engine", help="Execute sinc JSON prompt")
     sp_engine.add_argument("file", nargs="?")
     sp_engine.add_argument("--dry-run", action="store_true")
+    sp_engine.add_argument("--provider", default="anthropic",
+                           choices=["anthropic", "openai", "ollama", "vllm"],
+                           help="LLM provider (default: anthropic)")
     sp_engine.add_argument("--model", default="claude-sonnet-4-20250514")
     sp_engine.add_argument("--api-key", default=None)
     sp_engine.add_argument("--max-tokens", type=int, default=8192)
+
+    # format (build + execute via any provider)
+    sp_format = subparsers.add_parser("format", help="Build sinc JSON and optionally execute via any provider")
+    sp_format.add_argument("--persona", default="", help="n=0 PERSONA band")
+    sp_format.add_argument("--context", default="", help="n=1 CONTEXT band")
+    sp_format.add_argument("--data", default="", help="n=2 DATA band")
+    sp_format.add_argument("--constraints", default="", help="n=3 CONSTRAINTS band")
+    sp_format.add_argument("--format", default="", dest="fmt", help="n=4 FORMAT band")
+    sp_format.add_argument("--task", default="", help="n=5 TASK band")
+    sp_format.add_argument("--provider", default="anthropic",
+                           choices=["anthropic", "openai", "ollama", "vllm"],
+                           help="LLM provider (default: anthropic)")
+    sp_format.add_argument("--model", default=None,
+                           help="Model name (provider-specific, uses provider default if omitted)")
+    sp_format.add_argument("--execute", action="store_true", help="Execute the formatted prompt")
+    sp_format.add_argument("--dry-run", action="store_true", help="Build and validate only")
 
     # server
     sp_server = subparsers.add_parser("server", help="Start HTTP server")
@@ -377,6 +405,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         scatter_argv = list(args.prompt or [])
         if args.execute:
             scatter_argv.append("--execute")
+        if args.provider != "anthropic":
+            scatter_argv.extend(["--provider", args.provider])
         if args.model != "claude-haiku-4-20250514":
             scatter_argv.extend(["--model", args.model])
         if args.execute_model != "claude-sonnet-4-20250514":
@@ -391,6 +421,8 @@ def main(argv: Optional[List[str]] = None) -> None:
             engine_argv.append(args.file)
         if args.dry_run:
             engine_argv.append("--dry-run")
+        if args.provider != "anthropic":
+            engine_argv.extend(["--provider", args.provider])
         if args.model != "claude-sonnet-4-20250514":
             engine_argv.extend(["--model", args.model])
         if args.api_key:
@@ -439,6 +471,68 @@ def main(argv: Optional[List[str]] = None) -> None:
         snr_data = compute_snr(sinc_json)
         sinc_json["_snr"] = snr_data
         print(json.dumps(sinc_json, indent=2, ensure_ascii=False))
+
+    elif args.command == "format":
+        # Build sinc JSON
+        sinc_json = build_sinc_json(
+            persona=args.persona,
+            context=args.context,
+            data=args.data,
+            constraints=args.constraints,
+            fmt=args.fmt,
+            task=args.task,
+        )
+        snr_data = compute_snr(sinc_json)
+        parsed = parse_sinc_json(sinc_json)
+
+        if args.dry_run or not args.execute:
+            sinc_json["_snr"] = snr_data
+            print(json.dumps(sinc_json, indent=2, ensure_ascii=False))
+            return
+
+        # Execute via selected provider
+        from sinc_llm.providers import get_provider
+
+        provider_name = args.provider
+        model_name = args.model
+
+        # Set provider-appropriate defaults if model not specified
+        if not model_name:
+            provider_defaults = {
+                "anthropic": "claude-sonnet-4-20250514",
+                "openai": "gpt-4o-mini",
+                "ollama": "llama3",
+                "vllm": "default",
+            }
+            model_name = provider_defaults.get(provider_name, "default")
+
+        provider = get_provider(provider_name)
+
+        # Build flat prompt from sinc format
+        prompt_parts = []
+        for frag in sorted(sinc_json.get("fragments", []), key=lambda f: f.get("n", 0)):
+            if frag.get("x"):
+                prompt_parts.append(f"[{frag['t']}]\n{frag['x']}")
+        full_prompt = "\n\n".join(prompt_parts)
+
+        t0 = time.time()
+        response_text = provider.generate(full_prompt, model_name)
+        elapsed = time.time() - t0
+
+        # Output
+        print(response_text)
+        print()
+        print("--- SINC RECONSTRUCTION ---")
+        print(f"Provider: {provider_name}")
+        print(f"Model: {model_name}")
+        print(f"SNR: {snr_data['snr']} ({snr_data['grade']})")
+        print(f"Fragments: {snr_data['fragments']}")
+        zones = snr_data["zones"]
+        print(
+            f"Zones: G(Z1)={zones['G(Z1)']} H(Z2)={zones['H(Z2)']} "
+            f"R(Z3)={zones['R(Z3)']} G(Z4)={zones['G(Z4)']}"
+        )
+        print(f"Elapsed: {elapsed:.1f}s")
 
     else:
         parser.print_help()
